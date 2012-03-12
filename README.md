@@ -26,6 +26,6 @@ This will spit out an iCal file that you can import into your calendar applicati
 
 ## Huh?
 
-So, this little script is really only going to work if you rate your tracks in iTunes.  If you don't do that, don't even both trying to use this because it will not do anything for you.
+So, this little script is really only going to work if you rate your tracks in iTunes.  If you don't do that, don't even bother trying to use this because it will not do anything for you.
 
 Why?  Because Jamie wrote it for himself and that's how he does things.  If it doesn't work for you that's a bummer, but it's how it is.
