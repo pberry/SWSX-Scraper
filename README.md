@@ -11,3 +11,15 @@ copyright notice and this permission notice appear in supporting
 documentation.  No representations are made about the suitability of this
 software for any purpose.  It is provided "as is" without express or 
 implied warranty.
+
+## How To Use This
+
+You will need to have perl installed.  If you don't have perl installed, perhaps this isn't the best tool for you right now.  You will also need DateTime installed (which isn't by default in OS X).
+
+`sudo cpan install DateTime`
+
+Now that we have that little task out of the way, you can run the script:
+
+`perl sxsw-scraper.pl --stars 3 outfile.ics`
+
+This will spit out an iCal file that you can import into your calendar application of choice and you will be ready for SxSW!  Hooray!
