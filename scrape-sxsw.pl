@@ -1,5 +1,5 @@
 #!/usr/bin/perl -w
-# Copyright © 2012 Jamie Zawinski <jwz@jwz.org>
+# Copyright © 2012-2013 Jamie Zawinski <jwz@jwz.org>
 #
 # Permission to use, copy, modify, distribute, and sell this software and its
 # documentation for any purpose is hereby granted without fee, provided that
@@ -13,7 +13,7 @@
 #
 #  - First, generate a list of bands of interest by getting a list
 #    of all artists with at least one song ranked 3 stars or higher
-#    in iTunes.
+#    in iTunes.  Also, all music videos.
 #
 #  - Then scrape sxsw.com and build ICS from it.
 #
@@ -33,45 +33,65 @@
 #
 #   --stars 3	Set the minimum number of stars for tracks of interest.
 #
-#   --sched	Scrape sched.org instead of sxsw.com.  Sched lists more
-#		events, but it's unclear to me which one is more reliable.
-#
-#   --both	What the hell, do them both (and skip duplicates).
+#   --loop 5	Parse the SXSW site N times, because sometimes it fucks up
+#		and omits some dates!  Yup, that's awesome.  So we can run
+#		against it 5 times or whatever and take the union.
 #
 # Before importing the generated .ics file into iCal, I strongly suggest:
 #
-#  - Check "Preferences / Advanced / Turn on time zone support".
-#  - Uncheck "Preferences / General / Add a default alert".
+#  - Check "Preferences / Advanced / Turn on time zone support" or
+#    else  things will import with the wrong times.
+#  - Set "Preferences / Alerts / Events" to "None" or else every event
+#    you import will have a default alert added to it.
 #
 # Import it into its own calendar to make it easy to nuke it and start over.
 #
 #
 # Created:  5-Mar-2012.
+# Updated:  8-Mar-2013.
 
 require 5;
 use diagnostics;
 use strict;
-use bytes;
+
+use open ":encoding(utf8)";
 
 use POSIX qw(mktime strftime);
 use LWP::Simple;
 use Date::Parse;
 use DateTime;
+use HTML::Entities;
 
 my $progname = $0; $progname =~ s@.*/@@g;
-my $version = q{ $Revision: 1.15 $ }; $version =~ s/^[^\d]+([\d.]+).*/$1/;
+my $version = q{ $Revision: 1.23 $ }; $version =~ s/^[^\d]+([\d.]+).*/$1/;
 
 my $verbose = 1;
 my $debug_p = 0;
 
 my $itunes_xml = $ENV{HOME} . "/Music/iTunes/iTunes Music Library.xml";
-my $base_url   = ('http://schedule.sxsw.com/2012/' .
-                  '?conference=music&lsort=name&day=ALL&category=Showcase');
+my $base_url   = ('http://schedule.sxsw.com/' .
+                  '?conference=music&lsort=name&day=ALL&event_type=Showcase');
 my $sched_url  = ('http://austin' . ((localtime)[5] + 1900) .
                   '.sched.org/all.ics');
 
 my $zone = 'US/Central';
 
+
+# Converts &, <, >, " and any UTF8 characters to HTML entities.
+#
+sub html_quote($) {
+  my ($s) = @_;
+  return HTML::Entities::encode_entities ($s,
+    # Exclude "=042 &=046 <=074 >=076
+    '^ \n\040\041\043-\045\047-\073\075\077-\176');
+}
+
+# Convert any HTML entities to Unicode characters.
+#
+sub html_unquote($) {
+  my ($s) = @_;
+  return HTML::Entities::decode_entities ($s);
+}
 
 # Strip HTML and blank lines and stuff.
 #
@@ -84,39 +104,7 @@ sub clean($) {
   $s =~ s/<P>\s*/\n\n/gsi;
   $s =~ s/<[^<>]*>//gsi;
 
-  $s =~ s/&nbsp;/ /gs;
-  $s =~ s/&lt;/</gs;
-  $s =~ s/&gt;/>/gs;
-  $s =~ s/&amp;/&/gs;
-
-  # Fucking Unicode. decode_utf8() does not work here and I don't know why.
-  #
-  $s =~ s/\342\200\220/-/gs;
-  $s =~ s/\342\200\223/ -- /gs;
-  $s =~ s/\342\200\224/ -- /gs;
-  $s =~ s/\342\200\230/\'/gs;
-  $s =~ s/\342\200\231/\'/gs;
-  $s =~ s/\342\200\234/\"/gs;
-  $s =~ s/\342\200\235/\"/gs;
-  $s =~ s/\342\200\241/a/gs;
-  $s =~ s/\342\200\242/*/gs;
-  $s =~ s/\342\200\246/ /gs;
-  $s =~ s/\342\200\250/*/gs;
-  $s =~ s/\342\200\262/\'/gs;
-  $s =~ s/\342\200\263/\"/gs;
-  $s =~ s/\342\200\266/o/gs;
-  $s =~ s/\303\266\171/o/gs;
-  $s =~ s/\303\251/e/gs;
-  $s =~ s/\303\274/u/gs;
-  $s =~ s/\303\240/ -- /gs;
-  $s =~ s/\312\273/\'/gs;
-  $s =~ s/\312\274/\'/gs;
-  $s =~ s/\037//gs;
-  $s =~ s/\302 / /gs;
-  $s =~ s/\302\240/ /gs;
-  $s =~ s/\302\204/\"/gs;
-  $s =~ s/\302\223/\"/gs;
-  $s =~ s/\013/\n\n/gs;
+  $s = html_unquote ($s);
 
   $s =~ s/\r\n/\n/gs;
   $s =~ s/\r/\n/gs;
@@ -126,6 +114,14 @@ sub clean($) {
   $s =~ s/\n/\n\n/gs;
   $s =~ s/\n\n\n+/\n\n/gs;
   $s =~ s/^\s+|\s+$//gs;
+
+  # Useless Unicrud
+  s/[\u0091]/`/gs;
+  s/[\u0092\u2018\u2019\u201a\u201b]/'/gs;
+  s/[\u0321\u0322\u0093\u0094\u201c\u201d\u201e\u201f]/"/gs;
+  s/[\u2013\u2014]/--/gs;
+  s/[\u2026]/.../gs;
+  s/[\u00a0]/ /gs;
 
   return $s;
 }
@@ -160,7 +156,7 @@ sub url_retry($;$) {
 
     $count++;
     if ($limit && $count > $limit) {
-      print STDERR "$progname: giving up on $url after $count tries\n";
+      print STDERR "$progname: ERROR: giving up on $url after $count tries\n";
       return "FAILED after $count tries";
     }
 
@@ -168,6 +164,8 @@ sub url_retry($;$) {
     $sec = int(($sec + 2) * 1.3);
     sleep ($sec);
   }
+
+  utf8::decode($body);  # Pack multi-byte UTF-8 back into wide chars.
   return $body;
 }
 
@@ -236,9 +234,22 @@ sub make_ics($$$$$$$) {
 
   $desc = "$url2\n\n$desc" if $url2;
 
+  # Though UID is specified in the RFC to be "text", it looks like
+  # things go crazy if you put a URL there.  I think it might be
+  # something like: iCal.app works fine, but then iCloud converts
+  # all the slashes to underscores, and you get duplicate events.
+  # Sometimes.  Or something.  Let's try simpler UIDs.
+  #
+  my $uid = $url;
+  $uid =~ s@^http://@@gs;
+  $uid =~ s@(event|schedule|www)s?@@gsi;
+  $uid =~ s@[^a-z\d_]+@_@gsi;
+  $uid =~ s@_+@_@gs;
+  $uid =~ s@^_|_$@@gs;
+
   my $ics = join ("\n",
                   ('BEGIN:VEVENT',
-                   'UID:'		. ical_quote ($url),
+                   'UID:'		. ical_quote ($uid),
                    'DTSTAMP:'		. ical_quote ($dtstamp),
                    'SEQUENCE:'		. $ics_seq++,
                    'LOCATION:'		. ical_quote ($loc, 1),
@@ -266,11 +277,17 @@ sub scrape_band($$) {
   my ($url3) = ($page =~ m@> \s* Online .*?
                            <A \s+ HREF=[\'\"]([^\'\"]+)@six);
 
-  $page =~ s@^.*?<div \b \s+ id="main@@six;
-  $page =~ s@^.*?<div \b \s+ class="block .*? > @@six;
+  $url3 =~ s@^(https?://[^/]+$)@$1/@s
+    if $url3;
+
+  $page =~ s@<div class=[\"\']social[^<>]*>.*?</div>@@gsi;
+
+  $page =~ s@^.*?<div \b \s+ id=[\"\']main@@six;
+  $page =~ s@<div \b \s+ id=[\"\']sidebar .* $@@six;
+  $page =~ s@^ .* <div \b \s+ class=[\"\']block .*? > @@six;
   $page =~ s@\s* </div> .* $@@six;
 
-  $page = '' if ($page =~ m@<h3@si);
+  $page = '' if ($page =~ m@<h\d@si);
   foreach ($url3, $page) { $_ = clean($_); }
 
   return ($url3, $page);
@@ -297,11 +314,21 @@ sub scrape_sxsw($$) {
     print STDERR "$progname: scraping: $url\n" if ($verbose);
     my $page = url_retry ($url);
 
-    foreach (split (m/<div\b \s+ class=\"row/six, $page)) {
-      my ($url2) = (m@<a\b [^<>]*? \b href=\" (event[^<>\"]+) @six);
+    $page =~ s@^.*</select>@@si;
+
+    my @chunks = split (m/<div\b \s+ class=[\"\']row/six, $page);
+    shift @chunks;
+
+    error ("$url: is fail") if (@chunks < 2);
+
+    foreach (@chunks) {
+      my ($url2) = (m@<a\b [^<>]*? \b href=[\"\'] /(\d*/?event[^<>\"\']+) @six);
       my ($band) = (m@<a\b.*?> \s* ([^<>]+?) \s* </a>@six);
-      my ($loc)  = (m@<div [^<>]*? \b class=\"loc[^<>]*> \s* ([^<>]+) @six);
-      my ($date) = (m@<div [^<>]*? \b class=\"date[^<>]*> \s* ([^<>]+) @six);
+      my ($loc)  = (m@<div [^<>]*? \b class=[\"\']loc[^<>]*> \s*([^<>]+) @six);
+      my ($date) = (m@<div [^<>]*? \b class=[\"\']date[^<>]*>\s*([^<>]+) @six);
+
+      error ("wat: \"$url2\" \"$band\" \"$loc\" \"$date\" \"$_\"")
+        if (!$url2 && ($loc || $date));
 
       next unless $url2;
 
@@ -311,13 +338,13 @@ sub scrape_sxsw($$) {
       error ("no title: $_") unless $band;
       #error ("no location: $_") unless $loc;
       if (! $loc) {
-        print STDERR "$progname: $band: no location!\n";
+        print STDERR "$progname: ERROR: $band: no location!\n";
         next;
       }
 
       #error ("no date: $_") unless $date;
       if (! $date) {
-        print STDERR "$progname: $band: no date!\n";
+        print STDERR "$progname: ERROR: $band: no date!\n";
         next;
       }
 
@@ -328,16 +355,23 @@ sub scrape_sxsw($$) {
       }
 
       my ($day, $start, $end) =
-       ($date =~ m/^(.*?)\s+(\d+:[^\s]+)[-\s]+(\d+:[^\s]+)\s*$/si);
+       ($date =~ m/^(.*?)\s*\b(\d+:[^-\s]+)[-\s]+(\d+:[^-\s]+)\s*$/si);
 
-#      error ("unparsable time: $date\n") unless $end;
-      if (! $end) {
-        print STDERR "$progname: $band: unparsable time: \"$date\"\n";
+      if (! $day) {
+        print STDERR "$progname: ERROR: $band: time only, no day: \"$date\"\n";
+        next;
+      }
+      if (! ($start || $end)) {
+        print STDERR "$progname: ERROR: $band: no time in date: \"$date\"\n";
         next;
       }
 
       my (undef, $smm, $shh, $sdotm, $smon, $syear) = strptime ("$day, $start");
       my (undef, $emm, $ehh, $edotm, $emon, $eyear) = strptime ("$day, $end");
+
+      error ("date fail $band: $day, $start") unless defined($smon);
+      error ("date fail $band: $day, $end")   unless defined($emon);
+
 
       $syear = $cyear unless $syear;
       $eyear = $cyear unless $eyear;
@@ -388,7 +422,7 @@ sub fix_sched_time($) {
   my ($yyyy, $mon, $dotm, $hh, $mm, $ss) = 
     ($d =~ m/^(\d{4})(\d\d)(\d\d)T(\d\d)(\d\d)(\d\d)Z$/si);
   if (! $yyyy) {
-    print STDERR "$progname: unparsable date: $d\n";
+    print STDERR "$progname: ERROR: unparsable date: $d\n";
     return ":$d";
   }
 
@@ -427,7 +461,7 @@ sub scrape_sched($$) {
 
     my ($band) = ($e =~ m@^SUMMARY:(.*?)$@mi);
     if (! $band) {
-      print STDERR "$progname: no title: $e\n";
+      print STDERR "$progname: ERROR: no title: $e\n";
       next;
     }
     $band =~ s/\\//gs;
@@ -444,13 +478,7 @@ sub scrape_sched($$) {
       next;
     }
 
-    $e =~ s/&nbsp;/ /gs;
-    $e =~ s/&[lr]squo;/\'/gs;
-    $e =~ s/&[lr]dquo;/\"/gs;
-    $e =~ s/&ndash;/-/gs;
-    $e =~ s/&mdash;/--/gs;
-    $e =~ s/&bull;/\\n\n  * /gs;
-    $e =~ s/&amp;/&/gs;
+    $e = html_unquote($e);
     $e =~ s/\t/ /gs;
     $e =~ s/(  ) +/$1/gs;
 
@@ -471,11 +499,11 @@ sub scrape_sched($$) {
     $url =~ s/^\s+|\s+$//gs;
 
     if (! $url) {
-      print STDERR "$progname: \"$band\": no url\n" if ($verbose > 1);
+      print STDERR "$progname: ERROR: \"$band\": no url\n" if ($verbose > 1);
     } else {
       my ($url2, $desc) = scrape_band ($band, $url);
       if (! $desc) {
-        print STDERR "$progname: \"$url\": no desc!\n" if ($verbose > 1);
+        print STDERR "$progname: ERROR: \"$url\": no desc!\n" if ($verbose > 1);
       } else {
         $desc = "$url2\n\n$desc" if $url2;
         $desc = ical_quote ($desc);
@@ -496,22 +524,21 @@ sub scrape_sched($$) {
 # Update each ICS event with the street address of its venue.
 # Scrapes the SXSW web site to find the addresses.
 #
-sub scrape_venues($) {
-  my ($events) = @_;
-
-  my %venues;
+sub scrape_venues($$) {
+  my ($events, $venues) = @_;
 
   foreach my $e (@$events) {
     my ($loc) = ($e =~ m/^LOCATION.*?:(.*)$/mi);
     if (! $loc) {
-      print STDERR "$progname: no LOCATION in event: $e\n";
+      print STDERR "$progname: ERROR: no LOCATION in event: $e\n";
       next;
     }
 
     $loc =~ s/\(.*$//s;
     $loc =~ s/\\//gs;
+    $loc =~ s/^\s+|\s+$//gs;
 
-    my $addr = $venues{$loc};
+    my $addr = $venues->{$loc};
 
     if (! $addr) {
       my $url = $base_url;
@@ -530,24 +557,23 @@ sub scrape_venues($) {
       ($addr) = ($page =~ m@<h2>([^<>]+)@si);
       $addr = clean ($addr);
       if (! $addr) {
-        print STDERR "$progname: no address for \"$loc\"\n";
+        my $u = ($e =~ m@^UID:(.*)@m);
+        print STDERR "$progname: ERROR: no address for \"$loc\" on $u\n";
         next;
       }
       print STDERR "$progname: venue: \"$loc\": $addr\n" if ($verbose > 1);
-      $venues{$loc} = $addr;
+      $venues->{$loc} = $addr;
     }
 
     # update the event
 
     if (! $addr) {
-      print STDERR "$progname: no addr for venue: $loc\n";
+      print STDERR "$progname: ERROR: no addr for venue: $loc\n";
     } else {
       $loc .= " ($addr)";
       $e =~ s/^(LOCATION.*?:)[^\n]*/$1$loc/mi;
     }
   }
-
-  return \%venues;
 }
 
 
@@ -602,23 +628,38 @@ sub cross_reference($) {
 
 # Fire, aim, ready.
 #
-sub scrape_all($$$) {
-  my ($out, $sched_p, $stars) = @_;
+sub scrape_all($$$$) {
+  my ($out, $sched_p, $stars, $loop) = @_;
 
   my $artists = load_bands($stars);
-  my ($events1, $events2, $count1, $count2);
+  my $events1 = [];
+  my $events2 = [];
+  my $count1 = 0;
+  my $count2 = 0;
   my %dups;
+  my %venues;
 
-  if ($sched_p != 0) {					# 1 or 2
-    $events1 = scrape_sched ($artists, \%dups);
-    $count1 = @$events1;
-    # sched.org already contains venue addrs.
-  }
+  for (my $ii = 0; $ii < $loop; $ii++) {
 
-  if ($sched_p != 1) {					# 0 or 2
-    $events2 = scrape_sxsw ($artists, \%dups);
-    scrape_venues ($events2);
-    $count2 = @$events2;
+    print STDERR "\n$progname: ##### PASS " . ($ii + 1) . "...\n\n"
+      if ($verbose && $loop > 1);
+
+    if ($sched_p != 0) {					# 1 or 2
+      my $e = scrape_sched ($artists, \%dups);
+      my @e = (@$events1, @$e);
+      $events1 = \@e;
+      $count1 = @$events1;
+      # sched.org already contains venue addrs.
+    }
+
+    if ($sched_p != 1) {					# 0 or 2
+      my $e = scrape_sxsw ($artists, \%dups);
+      my @e = (@$events2, @$e);
+      $events2 = \@e;
+      scrape_venues ($events2, \%venues);
+      $count2 = @$events2;
+      error ("wait, what") unless $count2;
+    }
   }
 
   my @events = ( ($events1 ? @$events1 : ()),
@@ -627,6 +668,14 @@ sub scrape_all($$$) {
 
   cross_reference ($events);
 
+  my @sorted = sort { my ($ta) = ($a =~ m/^(DTSTART:.*)/m);
+                      my ($tb) = ($b =~ m/^(DTSTART:.*)/m);
+                      my ($sa) = ($a =~ m/^(SUMMARY:.*)/m);
+                      my ($sb) = ($b =~ m/^(SUMMARY:.*)/m);
+                      $ta .= $sa;
+                      $tb .= $sb;
+                      return $ta cmp $tb;
+                    } @$events;
 
 #  if ($debug_p) {
 #    print STDERR "$progname: not writing $out\n" if ($verbose);
@@ -642,10 +691,11 @@ sub scrape_all($$$) {
                   'METHOD:PUBLISH',
                   'X-WR-TIMEZONE;VALUE=TEXT:' . $zone,
                   'CALSCALE:GREGORIAN',
-                  @$events,
+                  @sorted,
                   'END:VCALENDAR') . "\n";
   $c =~ s/(\n )(\n )+/$1/gs;
   $c =~ s/\n/\r\n/gs;
+  $c =~ s/  +/ /gs;
   print $of $c;
   close $of;
 
@@ -664,14 +714,17 @@ sub error($) {
 
 sub usage() {
   print STDERR "usage: $progname [--verbose] [--debug] [--stars N] " .
-    "[--sched] outfile.ics\n";
+    "[--loop 1] [--sched] outfile.ics\n";
   exit 1;
 }
 
 sub main() {
   my $stars = 3;
   my $sched = 0;
+  my $loop = 1;
   my $out;
+
+  binmode (STDERR, ':utf8');
 
   while ($#ARGV >= 0) {
     $_ = shift @ARGV;
@@ -682,12 +735,14 @@ sub main() {
     elsif (m/^--?stars$/s) { $stars = 0 + shift @ARGV; }
     elsif (m/^--?sched$/s) { $sched = 1; }
     elsif (m/^--?both$/s)  { $sched = 2; }
+    elsif (m/^--?loop$/s)  { $loop  = 0 + shift @ARGV; }
     elsif (m/^-./) { usage; }
     elsif (! $out) { $out = $_; }
     else { usage; }
   }
   usage unless $out;
-  scrape_all ($out, $sched, $stars);
+  error ("--sched doesn't work any more, sorry") if $sched;
+  scrape_all ($out, $sched, $stars, $loop);
 }
 
 main();
